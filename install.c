@@ -142,6 +142,72 @@ try_update_binary(const char *path, ZipArchive *zip) {
         return 1;
     }
 
+    /* Make sure the update binary is compatible with this recovery
+     *
+     * We're building this against 4.4's (or above) bionic, which
+     * has a different property namespace structure. Old updaters
+     * don't know how to deal with it, so if we think we got one
+     * of those, force the use of a fallback compatible copy and
+     * hope for the best
+     *
+     * if "set_perm_" is found, it's probably a regular updater
+     * instead of a custom one. And if "set_metadata_" isn't there,
+     * it's pre-4.4, which makes it incompatible
+     *
+     * Also, I hate matching strings in binary blobs */
+
+    FILE *updaterfile = fopen(binary, "rb");
+    char tmpbuf;
+    char setpermmatch[9] = { 's','e','t','_','p','e','r','m','_' };
+    char setmetamatch[13] = { 's','e','t','_','m','e','t','a','d','a','t','a','_' };
+    int pos = 0;
+    bool foundsetperm = false;
+    bool foundsetmeta = false;
+
+    if (updaterfile == NULL) {
+        LOGE("Can't find %s for validation\n", ASSUMED_UPDATE_BINARY_NAME);
+        return 1;
+    }
+    fseek(updaterfile, 0, SEEK_SET);
+    while (!feof(updaterfile)) {
+        fread(&tmpbuf, 1, 1, updaterfile);
+        if (!foundsetperm && pos < sizeof(setpermmatch) && tmpbuf == setpermmatch[pos]) {
+            pos++;
+            if (pos == sizeof(setpermmatch)) {
+                foundsetperm = true;
+                pos = 0;
+            }
+            continue;
+        }
+        if (!foundsetmeta && tmpbuf == setmetamatch[pos]) {
+            pos++;
+            if (pos == sizeof(setmetamatch)) {
+                foundsetmeta = true;
+                pos = 0;
+            }
+            continue;
+        }
+        /* None of the match loops got a continuation, reset the counter */
+        pos = 0;
+    }
+    fclose(updaterfile);
+
+    /* Found set_perm and !set_metadata, overwrite the binary with the fallback */
+    if (foundsetperm && !foundsetmeta) {
+        FILE *fallbackupdater = fopen("/res/updater.fallback", "rb");
+        FILE *updaterfile = fopen(binary, "wb");
+        char updbuf[1024];
+
+        LOGW("Using fallback updater for downgrade...\n");
+        while (!feof(fallbackupdater)) {
+           fread(&updbuf, 1, 1024, fallbackupdater);
+           fwrite(&updbuf, 1, 1024, updaterfile);
+        }
+        chmod(binary, 0755);
+        fclose(updaterfile);
+        fclose(fallbackupdater);
+    }
+
     int pipefd[2];
     pipe(pipefd);
 
@@ -264,13 +330,9 @@ try_update_binary(const char *path, ZipArchive *zip) {
 static int
 really_install_package(const char *path)
 {
-    int ret = 0;
-
     ui_set_background(BACKGROUND_ICON_INSTALLING);
     ui_print("Finding update package...\n");
     ui_show_indeterminate_progress();
-
-    set_perf_mode(1);
 
     // Resolve symlink in case legacy /sdcard path is used
     // Requires: symlink uses absolute path
@@ -296,8 +358,7 @@ really_install_package(const char *path)
 
     if (ensure_path_mounted(path) != 0) {
         LOGE("Can't mount %s\n", path);
-        ret = INSTALL_CORRUPT;
-        goto out;
+        return INSTALL_CORRUPT;
     }
 
     ui_print("Opening update package...\n");
@@ -309,8 +370,7 @@ really_install_package(const char *path)
         Certificate* loadedKeys = load_keys(PUBLIC_KEYS_FILE, &numKeys);
         if (loadedKeys == NULL) {
             LOGE("Failed to load keys\n");
-            ret = INSTALL_CORRUPT;
-            goto out;
+            return INSTALL_CORRUPT;
         }
         LOGI("%d key(s) loaded from %s\n", numKeys, PUBLIC_KEYS_FILE);
 
@@ -326,10 +386,8 @@ really_install_package(const char *path)
         if (err != VERIFY_SUCCESS) {
             LOGE("signature verification failed\n");
             ui_show_text(1);
-            if (!confirm_selection("Install Untrusted Package?", "Yes - Install untrusted zip")) {
-                ret = INSTALL_CORRUPT;
-                goto out;
-            }
+            if (!confirm_selection("Install Untrusted Package?", "Yes - Install untrusted zip"))
+                return INSTALL_CORRUPT;
         }
     }
 
@@ -339,18 +397,13 @@ really_install_package(const char *path)
     err = mzOpenZipArchive(path, &zip);
     if (err != 0) {
         LOGE("Can't open %s\n(%s)\n", path, err != -1 ? strerror(err) : "bad");
-        ret = INSTALL_CORRUPT;
-        goto out;
+        return INSTALL_CORRUPT;
     }
 
     /* Verify and install the contents of the package.
      */
     ui_print("Installing update...\n");
-    ret = try_update_binary(path, &zip);
-
-out:
-    set_perf_mode(0);
-    return ret;
+    return try_update_binary(path, &zip);
 }
 
 int
