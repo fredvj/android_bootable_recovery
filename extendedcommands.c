@@ -47,7 +47,6 @@
 #include "adb_install.h"
 
 int signature_check_enabled = 1;
-int script_assert_enabled = 1;
 
 int get_filtered_menu_selection(const char** headers, char** items, int menu_only, int initial_selection, int items_count) {
     int index;
@@ -98,7 +97,7 @@ void write_recovery_version() {
     char path[PATH_MAX];
     sprintf(path, "%s%s%s", get_primary_storage_path(), (is_data_media() ? "/0/" : "/"), RECOVERY_VERSION_FILE);
     write_string_to_file(path, EXPAND(RECOVERY_VERSION) "\n" EXPAND(TARGET_DEVICE));
-    // force unmount /data on /data/media devices as we call this on recovery start
+    // force unmount /data for /data/media devices as we call this on recovery exit
     ignore_data_media_workaround(1);
     ensure_path_unmounted(path);
     ignore_data_media_workaround(0);
@@ -111,7 +110,7 @@ static void write_last_install_path(const char* install_path) {
 }
 
 const char* read_last_install_path() {
-    char path[PATH_MAX];
+    static char path[PATH_MAX];
     sprintf(path, "%s%s%s", get_primary_storage_path(), (is_data_media() ? "/0/" : "/"), RECOVERY_LAST_INSTALL_FILE);
 
     ensure_path_mounted(path);
@@ -211,8 +210,7 @@ int show_install_update_menu() {
         } else if (chosen_item >= FIXED_TOP_INSTALL_ZIP_MENUS && chosen_item < FIXED_TOP_INSTALL_ZIP_MENUS + num_extra_volumes) {
             show_choose_zip_menu(extra_paths[chosen_item - FIXED_TOP_INSTALL_ZIP_MENUS]);
         } else if (chosen_item == FIXED_TOP_INSTALL_ZIP_MENUS + num_extra_volumes) {
-            char *last_path_used;
-            last_path_used = read_last_install_path();
+            const char *last_path_used = read_last_install_path();
             if (last_path_used == NULL)
                 show_choose_zip_menu(primary_path);
             else
@@ -345,10 +343,7 @@ char** gather_files(const char* directory, const char* fileExtensionOrDirectory,
 
 // pass in NULL for fileExtensionOrDirectory and you will get a directory chooser
 char* choose_file_menu(const char* basedir, const char* fileExtensionOrDirectory, const char* headers[]) {
-    static const char* fixed_headers[20];
-    char path[PATH_MAX] = "";
-    DIR *dir;
-    struct dirent *de;
+    const char* fixed_headers[20];
     int numFiles = 0;
     int numDirs = 0;
     int i;
@@ -358,16 +353,12 @@ char* choose_file_menu(const char* basedir, const char* fileExtensionOrDirectory
 
     strcpy(directory, basedir);
 
-    // Append a traiing slash if necessary
+    // Append a trailing slash if necessary
     if (directory[dir_len - 1] != '/') {
         strcat(directory, "/");
         dir_len++;
     }
 
-    i = 0;
-    while (headers[i]) {
-        i++;
-    }
     i = 0;
     while (headers[i]) {
         fixed_headers[i] = headers[i];
@@ -401,19 +392,16 @@ char* choose_file_menu(const char* basedir, const char* fileExtensionOrDirectory
             int chosen_item = get_menu_selection(fixed_headers, list, 0, 0);
             if (chosen_item == GO_BACK || chosen_item == REFRESH)
                 break;
-            char ret[PATH_MAX];
             if (chosen_item < numDirs) {
                 char* subret = choose_file_menu(dirs[chosen_item], fileExtensionOrDirectory, headers);
                 if (subret != NULL) {
-                    strcpy(ret, subret);
-                    return_value = strdup(ret);
+                    return_value = strdup(subret);
                     free(subret);
                     break;
                 }
                 continue;
             }
-            strcpy(ret, files[chosen_item - numDirs]);
-            return_value = strdup(ret);
+            return_value = strdup(files[chosen_item - numDirs]);
             break;
         }
         free_string_array(list);
@@ -435,11 +423,10 @@ void show_choose_zip_menu(const char *mount_point) {
     char* file = choose_file_menu(mount_point, ".zip", headers);
     if (file == NULL)
         return;
-    static char* confirm_install = "Confirm install?";
-    static char confirm[PATH_MAX];
+    char confirm[PATH_MAX];
     sprintf(confirm, "Yes - Install %s", basename(file));
 
-    if (confirm_selection(confirm_install, confirm)) {
+    if (confirm_selection("Confirm install?", confirm)) {
         install_zip(file);
         write_last_install_path(dirname(file));
     }
@@ -482,7 +469,6 @@ void show_nandroid_delete_menu(const char* path) {
         return;
 
     if (confirm_selection("Confirm delete?", "Yes - Delete")) {
-        // nandroid_restore(file, 1, 1, 1, 1, 1, 0);
         sprintf(tmp, "rm -rf %s", file);
         __system(tmp);
     }
@@ -1239,7 +1225,7 @@ void format_sdcard(const char* volume) {
     if (!fs_mgr_is_voldmanaged(v) && !can_partition(volume))
         return;
 
-    char* headers[] = { "Format device:", volume, "", NULL };
+    const char* headers[] = { "Format device:", volume, "", NULL };
 
     static char* list[] = { "default",
                             "vfat",
@@ -1302,7 +1288,7 @@ void format_sdcard(const char* volume) {
         ui_print("Done formatting %s (%s)\n", volume, list[chosen_item]);
 }
 
-static void partition_sdcard(const char* volume) {
+void partition_sdcard(const char* volume) {
     if (!can_partition(volume)) {
         ui_print("Can't partition device: %s\n", volume);
         return;
